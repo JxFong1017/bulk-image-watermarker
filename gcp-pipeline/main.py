@@ -71,40 +71,39 @@ def handle_event():
     src_bucket_name = None
     object_name = None
 
-    # 1. Check HTTP headers for Binary CloudEvent format
-    if flask.request.headers.get("ce-type"):
-        src_bucket_name = flask.request.headers.get("ce-bucket")
-        subject = flask.request.headers.get("ce-subject", "")
-        if subject.startswith("objects/"):
-            object_name = subject[8:]
-        else:
-            object_name = subject
+    # 3. Add Logging: Log the raw payload type to help diagnose any future format changes.
+    logging.info(f"Received event payload: {envelope}")
 
-    # 2. Check Structured CloudEvent format
-    if not src_bucket_name or not object_name:
-        data = envelope.get("data", envelope)
+    # 1. Modify handle_event in main.py to be more resilient
+    if "message" in envelope and isinstance(envelope["message"], dict) and "data" in envelope["message"]:
+        logging.info("Detected Pub/Sub wrapped message.")
+        import base64, json
+        try:
+            decoded = json.loads(base64.b64decode(envelope["message"]["data"]).decode("utf-8"))
+            src_bucket_name = decoded.get("bucket")
+            object_name = decoded.get("name")
+        except Exception as e:
+            logging.error(f"Failed to decode Pub/Sub data: {e}")
+            
+    elif "bucket" in envelope and "name" in envelope:
+        logging.info("Detected direct GCS notification.")
+        src_bucket_name = envelope.get("bucket")
+        object_name = envelope.get("name")
+        
+    else:
+        logging.info("Detected standard Eventarc CloudEvent.")
+        data = envelope.get("data", {})
         if isinstance(data, dict):
-            src_bucket_name = src_bucket_name or data.get("bucket")
-            object_name = object_name or data.get("name")
+            src_bucket_name = data.get("bucket")
+            object_name = data.get("name")
 
-    # 3. Check Pub/Sub push format (base64 data)
-    if not src_bucket_name or not object_name:
-        msg = envelope.get("message", {})
-        if "data" in msg:
-            import base64, json
-            try:
-                decoded = json.loads(base64.b64decode(msg["data"]).decode("utf-8"))
-                src_bucket_name = src_bucket_name or decoded.get("bucket")
-                object_name = object_name or decoded.get("name")
-            except Exception:
-                pass
-
+    # 2. Ensure Object Decoding: Always use urllib.parse.unquote on the object name
     if object_name:
         import urllib.parse
         object_name = urllib.parse.unquote(object_name)
 
     if not src_bucket_name or not object_name:
-        logging.error(f"Missing bucket/name. Headers: {dict(flask.request.headers)}. Payload: {envelope}")
+        logging.error("Missing bucket or name in event payload.")
         return "Bad Request: missing bucket/name", 400
 
     logging.info(f"Processing gs://{src_bucket_name}/{object_name}")
