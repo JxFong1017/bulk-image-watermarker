@@ -1,7 +1,6 @@
 import io
 import os
 import logging
-import urllib.parse
 import flask
 from google.cloud import storage
 from PIL import Image, ImageOps
@@ -83,6 +82,7 @@ def handle_event():
     # Eventarc CloudEvent data fields
     src_bucket_name = data.get("bucket")
     # URL-decode the object name: Eventarc may deliver spaces as %20, etc.
+    import urllib.parse
     object_name = urllib.parse.unquote(data.get("name", "")) or None
 
     if not src_bucket_name or not object_name:

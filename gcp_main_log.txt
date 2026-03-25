@@ -1,0 +1,175 @@
+commit 49838bec989f3fb09d993d7380ed3ed13c15cbb8
+Author: JxFong <jxfong357@gmail.com>
+Date:   Wed Mar 25 14:19:58 2026 +0800
+
+    chore: remove terraform binaries and update gitignore
+
+diff --git a/gcp-pipeline/main.py b/gcp-pipeline/main.py
+index b9051d2..a6263c5 100644
+--- a/gcp-pipeline/main.py
++++ b/gcp-pipeline/main.py
+@@ -1,6 +1,7 @@
+ import io
+ import os
+ import logging
++import urllib.parse
+ import flask
+ from google.cloud import storage
+ from PIL import Image, ImageOps
+@@ -71,13 +72,21 @@ def handle_event():
+         logging.error("No JSON payload received.")
+         return "Bad Request: missing JSON payload", 400
+ 
+-    # Eventarc CloudEvent data
+-    data = envelope.get("data", {})
++    # Log the payload for debugging if needed
++    logging.debug(f"Payload: {envelope}")
++
++    # Robust event data extraction
++    # 1. Try 'data' field (standard for CloudEvents)
++    # 2. Try the root (some Eventarc configurations)
++    data = envelope.get("data", envelope)
++    
++    # Eventarc CloudEvent data fields
+     src_bucket_name = data.get("bucket")
+-    object_name = data.get("name")
++    # URL-decode the object name: Eventarc may deliver spaces as %20, etc.
++    object_name = urllib.parse.unquote(data.get("name", "")) or None
+ 
+     if not src_bucket_name or not object_name:
+-        logging.error("Missing bucket or name in event payload.")
++        logging.error(f"Missing bucket or name. Payload received: {envelope}")
+         return "Bad Request: missing bucket/name", 400
+ 
+     logging.info(f"Processing gs://{src_bucket_name}/{object_name}")
+
+commit ed932fbdda956022d535cf2b7305dd777aedd54c
+Author: JxFong <jxfong357@gmail.com>
+Date:   Tue Mar 24 21:13:26 2026 +0800
+
+    Add GCP image processing pipeline blueprint and implementation
+
+diff --git a/gcp-pipeline/main.py b/gcp-pipeline/main.py
+new file mode 100644
+index 0000000..b9051d2
+--- /dev/null
++++ b/gcp-pipeline/main.py
+@@ -0,0 +1,118 @@
++import io
++import os
++import logging
++import flask
++from google.cloud import storage
++from PIL import Image, ImageOps
++import pillow_heif
++
++# Register HEIF/HEIC opener
++pillow_heif.register_heif_opener()
++
++logging.basicConfig(level=logging.INFO)
++app = flask.Flask(__name__)
++
++# Environment variables
++INPUT_BUCKET = os.environ.get("INPUT_BUCKET", "raw-images")
++OUTPUT_BUCKET = os.environ.get("OUTPUT_BUCKET", "watermarked-images")
++ASSETS_BUCKET = os.environ.get("ASSETS_BUCKET", "assets")
++WATERMARK_OBJECT = os.environ.get("WATERMARK_OBJECT", "watermark.png")
++
++LOGO_SCALE = 0.40   # 40% of the longest side
++MARGIN_PCT = 0.03   # 3% margin from corner
++
++storage_client = storage.Client()
++
++def load_watermark() -> Image.Image:
++    """Load watermark PNG from the GCS assets bucket."""
++    bucket = storage_client.bucket(ASSETS_BUCKET)
++    blob = bucket.blob(WATERMARK_OBJECT)
++    data = io.BytesIO(blob.download_as_bytes())
++    logo = Image.open(data).convert("RGBA")
++    return logo
++
++def apply_watermark(img: Image.Image, logo: Image.Image) -> Image.Image:
++    """
++    Watermark an image:
++    - Logo scaled to 40% of the longest side
++    - Placed top-right with a 3% margin
++    """
++    img = ImageOps.exif_transpose(img)
++
++    if img.mode != "RGBA":
++        img = img.convert("RGBA")
++
++    img_w, img_h = img.size
++    longest = max(img_w, img_h)
++
++    # Scale logo
++    target_w = int(longest * LOGO_SCALE)
++    aspect = logo.height / logo.width
++    target_h = int(target_w * aspect)
++    logo_resized = logo.resize((target_w, target_h), Image.Resampling.LANCZOS)
++
++    # Position: top-right with 3% margin
++    margin = int(longest * MARGIN_PCT)
++    x = img_w - target_w - margin
++    y = margin
++
++    # Composite
++    canvas = Image.new("RGBA", img.size, (0, 0, 0, 0))
++    canvas.paste(img, (0, 0))
++    canvas.paste(logo_resized, (x, y), mask=logo_resized)
++
++    return canvas
++
++@app.route("/", methods=["POST"])
++def handle_event():
++    """Receive Eventarc GCS finalized event and process the image."""
++    envelope = flask.request.get_json(silent=True)
++    if not envelope:
++        logging.error("No JSON payload received.")
++        return "Bad Request: missing JSON payload", 400
++
++    # Eventarc CloudEvent data
++    data = envelope.get("data", {})
++    src_bucket_name = data.get("bucket")
++    object_name = data.get("name")
++
++    if not src_bucket_name or not object_name:
++        logging.error("Missing bucket or name in event payload.")
++        return "Bad Request: missing bucket/name", 400
++
++    logging.info(f"Processing gs://{src_bucket_name}/{object_name}")
++
++    # Download source image
++    src_bucket = storage_client.bucket(src_bucket_name)
++    src_blob = src_bucket.blob(object_name)
++    img_bytes = io.BytesIO(src_blob.download_as_bytes())
++
++    # Open and watermark
++    img = Image.open(img_bytes)
++    logo = load_watermark()
++    result = apply_watermark(img, logo)
++
++    # Save as JPEG
++    output_buf = io.BytesIO()
++    result.convert("RGB").save(output_buf, format="JPEG", quality=95)
++    output_buf.seek(0)
++
++    # Determine output filename (convert .heic/.heif to .jpg)
++    base, ext = os.path.splitext(object_name)
++    if ext.lower() in [".heic", ".heif"]:
++        out_name = base + ".jpg"
++    else:
++        out_name = object_name
++
++    out_name = "watermarked_" + out_name
++
++    # Upload to output bucket
++    out_bucket = storage_client.bucket(OUTPUT_BUCKET)
++    out_blob = out_bucket.blob(out_name)
++    out_blob.upload_from_file(output_buf, content_type="image/jpeg")
++
++    logging.info(f"Uploaded watermarked image to gs://{OUTPUT_BUCKET}/{out_name}")
++    return f"Processed {object_name}", 200
++
++if __name__ == "__main__":
++    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)), debug=False)
