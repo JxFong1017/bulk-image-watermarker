@@ -1,6 +1,7 @@
 import io
 import os
 import logging
+import urllib.parse
 import flask
 from google.cloud import storage
 from PIL import Image, ImageOps
@@ -71,13 +72,21 @@ def handle_event():
         logging.error("No JSON payload received.")
         return "Bad Request: missing JSON payload", 400
 
-    # Eventarc CloudEvent data
-    data = envelope.get("data", {})
+    # Log the payload for debugging if needed
+    logging.debug(f"Payload: {envelope}")
+
+    # Robust event data extraction
+    # 1. Try 'data' field (standard for CloudEvents)
+    # 2. Try the root (some Eventarc configurations)
+    data = envelope.get("data", envelope)
+    
+    # Eventarc CloudEvent data fields
     src_bucket_name = data.get("bucket")
-    object_name = data.get("name")
+    # URL-decode the object name: Eventarc may deliver spaces as %20, etc.
+    object_name = urllib.parse.unquote(data.get("name", "")) or None
 
     if not src_bucket_name or not object_name:
-        logging.error("Missing bucket or name in event payload.")
+        logging.error(f"Missing bucket or name. Payload received: {envelope}")
         return "Bad Request: missing bucket/name", 400
 
     logging.info(f"Processing gs://{src_bucket_name}/{object_name}")
