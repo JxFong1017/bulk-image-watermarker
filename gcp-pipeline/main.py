@@ -71,39 +71,24 @@ def handle_event():
     src_bucket_name = None
     object_name = None
 
-    # 3. Add Logging: Log the raw payload type to help diagnose any future format changes.
-    logging.info(f"Received event payload: {envelope}")
-
-    # 1. Modify handle_event in main.py to be more resilient
-    if "message" in envelope and isinstance(envelope["message"], dict) and "data" in envelope["message"]:
-        logging.info("Detected Pub/Sub wrapped message.")
-        import base64, json
-        try:
-            decoded = json.loads(base64.b64decode(envelope["message"]["data"]).decode("utf-8"))
-            src_bucket_name = decoded.get("bucket")
-            object_name = decoded.get("name")
-        except Exception as e:
-            logging.error(f"Failed to decode Pub/Sub data: {e}")
-            
-    elif "bucket" in envelope and "name" in envelope:
-        logging.info("Detected direct GCS notification.")
+    # First, check if bucket and name exist at the root (Binary mode/GCS notifications)
+    if "bucket" in envelope and "name" in envelope:
         src_bucket_name = envelope.get("bucket")
         object_name = envelope.get("name")
-        
-    else:
-        logging.info("Detected standard Eventarc CloudEvent.")
-        data = envelope.get("data", {})
-        if isinstance(data, dict):
-            src_bucket_name = data.get("bucket")
-            object_name = data.get("name")
+    # If not found at the root, check inside a data field (Structured mode)
+    elif "data" in envelope and isinstance(envelope["data"], dict):
+        src_bucket_name = envelope["data"].get("bucket")
+        object_name = envelope["data"].get("name")
 
-    # 2. Ensure Object Decoding: Always use urllib.parse.unquote on the object name
+    # Ensure Object Decoding
     if object_name:
         import urllib.parse
         object_name = urllib.parse.unquote(object_name)
 
+    # If still not found, log the entire JSON payload as an error
     if not src_bucket_name or not object_name:
-        logging.error("Missing bucket or name in event payload.")
+        import json
+        logging.error(f"Missing bucket or name in event payload. Raw payload: {json.dumps(envelope)}")
         return "Bad Request: missing bucket/name", 400
 
     logging.info(f"Processing gs://{src_bucket_name}/{object_name}")
