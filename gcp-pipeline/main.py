@@ -66,27 +66,45 @@ def apply_watermark(img: Image.Image, logo: Image.Image) -> Image.Image:
 @app.route("/", methods=["POST"])
 def handle_event():
     """Receive Eventarc GCS finalized event and process the image."""
-    envelope = flask.request.get_json(silent=True)
-    if not envelope:
-        logging.error("No JSON payload received.")
-        return "Bad Request: missing JSON payload", 400
-
-    # Log the payload for debugging if needed
-    logging.debug(f"Payload: {envelope}")
-
-    # Robust event data extraction
-    # 1. Try 'data' field (standard for CloudEvents)
-    # 2. Try the root (some Eventarc configurations)
-    data = envelope.get("data", envelope)
+    envelope = flask.request.get_json(silent=True) or {}
     
-    # Eventarc CloudEvent data fields
-    src_bucket_name = data.get("bucket")
-    # URL-decode the object name: Eventarc may deliver spaces as %20, etc.
-    import urllib.parse
-    object_name = urllib.parse.unquote(data.get("name", "")) or None
+    src_bucket_name = None
+    object_name = None
+
+    # 1. Check HTTP headers for Binary CloudEvent format
+    if flask.request.headers.get("ce-type"):
+        src_bucket_name = flask.request.headers.get("ce-bucket")
+        subject = flask.request.headers.get("ce-subject", "")
+        if subject.startswith("objects/"):
+            object_name = subject[8:]
+        else:
+            object_name = subject
+
+    # 2. Check Structured CloudEvent format
+    if not src_bucket_name or not object_name:
+        data = envelope.get("data", envelope)
+        if isinstance(data, dict):
+            src_bucket_name = src_bucket_name or data.get("bucket")
+            object_name = object_name or data.get("name")
+
+    # 3. Check Pub/Sub push format (base64 data)
+    if not src_bucket_name or not object_name:
+        msg = envelope.get("message", {})
+        if "data" in msg:
+            import base64, json
+            try:
+                decoded = json.loads(base64.b64decode(msg["data"]).decode("utf-8"))
+                src_bucket_name = src_bucket_name or decoded.get("bucket")
+                object_name = object_name or decoded.get("name")
+            except Exception:
+                pass
+
+    if object_name:
+        import urllib.parse
+        object_name = urllib.parse.unquote(object_name)
 
     if not src_bucket_name or not object_name:
-        logging.error(f"Missing bucket or name. Payload received: {envelope}")
+        logging.error(f"Missing bucket/name. Headers: {dict(flask.request.headers)}. Payload: {envelope}")
         return "Bad Request: missing bucket/name", 400
 
     logging.info(f"Processing gs://{src_bucket_name}/{object_name}")
