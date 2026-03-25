@@ -11,7 +11,10 @@ $ErrorActionPreference = "Stop"
 
 $ServiceName = "image-watermarker"
 $RepoName = "watermarker-repo"
-$ImageUri = "${Region}-docker.pkg.dev/${ProjectId}/${RepoName}/${ServiceName}:latest"
+# Use a timestamp tag so every deploy produces a unique image URI,
+# which forces Terraform to detect a change and create a new Cloud Run revision.
+$Tag = (Get-Date -Format "yyyyMMdd-HHmmss")
+$ImageUri = "${Region}-docker.pkg.dev/${ProjectId}/${RepoName}/${ServiceName}:${Tag}"
 
 Write-Host "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" -ForegroundColor Cyan
 Write-Host "  PROJECT : $ProjectId"
@@ -49,7 +52,7 @@ gcloud builds submit . `
 
 # ── 4. Terraform init + apply ─────────────────────────────────────────────────
 Write-Host "▶ Running Terraform..." -ForegroundColor Yellow
-terraform init
+terraform init -upgrade
 
 terraform apply `
   -var="project_id=$ProjectId" `
